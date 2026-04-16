@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "se-observability"
+version = "0.1.0"
+description = "Shared observability utilities for SE microservices (logger, request-id, middleware, audit)"
+requires-python = ">=3.11"
+authors = [{ name = "Sergey Evsiukov" }]
+dependencies = [
+    "starlette>=0.40.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["se_observability*"]
