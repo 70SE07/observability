@@ -1,103 +1,39 @@
-"""Audit trail — бізнес-подiї для учёта.
+"""Audit trail — generic structured business events.
 
-ЦКП: структурований запис бізнес-подій (хто, що, скільки коштувало).
-Зараз пише в лог-файл з prefix "audit". Коли з'явиться billing — перейде на DB.
+ЦКП: запись одной строки аудита в лог-файл с префиксом "audit action=...".
 
-Контракт:
-- record_generation(telegram_id, model, cost, elapsed, **extra)
-- record_edit(telegram_id, model, cost, elapsed, **extra)
-- record_upscale(telegram_id, elapsed, **extra)
+Package-level только **generic** API. Domain-specific wrappers (напр.
+record_generation для generation service) — в каждом сервисе локально,
+чтобы shared package не раздувался доменом (SRP).
 
-telegram_id — natural key з User контракту (не DB surrogate id).
+Usage:
+    from se_observability import audit
+    audit.record_event("ideate", user=123, cost=0.05, refs=1)
+
+    # В своём сервисе можно обернуть:
+    # generation/audit.py:
+    #   from se_observability.audit import record_event
+    #   def record_generation(telegram_id, model, cost_usd, elapsed_s, **extra):
+    #       record_event("generate", user=telegram_id, model=model,
+    #                    cost_usd=cost_usd, elapsed_s=elapsed_s, **extra)
 """
 
-from dataclasses import dataclass
+from __future__ import annotations
 
 from .logger import get_logger
 
-log = get_logger("audit")
-
-
-@dataclass
-class AuditEvent:
-    """Одна бізнес-подія."""
-
-    action: str
-    telegram_id: int | None
-    model: str
-    cost_usd: float
-    elapsed_s: float
-    extra: dict[str, str | int | float]
-
-    def emit(self) -> None:
-        extra_str = " ".join(f"{k}={v}" for k, v in self.extra.items())
-        log.info(
-            "audit  action=%s user=%s model=%s cost=$%.4f elapsed=%.2fs %s",
-            self.action,
-            self.telegram_id or "anon",
-            self.model or "-",
-            self.cost_usd,
-            self.elapsed_s,
-            extra_str,
-        )
-
-
-def record_generation(
-    telegram_id: int | None = None,
-    model: str = "",
-    cost_usd: float = 0.0,
-    elapsed_s: float = 0.0,
-    **extra: str | int | float,
-) -> None:
-    AuditEvent(
-        action="generate",
-        telegram_id=telegram_id,
-        model=model,
-        cost_usd=cost_usd,
-        elapsed_s=elapsed_s,
-        extra=extra,
-    ).emit()
-
-
-def record_edit(
-    telegram_id: int | None = None,
-    model: str = "",
-    cost_usd: float = 0.0,
-    elapsed_s: float = 0.0,
-    **extra: str | int | float,
-) -> None:
-    AuditEvent(
-        action="edit",
-        telegram_id=telegram_id,
-        model=model,
-        cost_usd=cost_usd,
-        elapsed_s=elapsed_s,
-        extra=extra,
-    ).emit()
-
-
-def record_upscale(
-    telegram_id: int | None = None,
-    elapsed_s: float = 0.0,
-    **extra: str | int | float,
-) -> None:
-    AuditEvent(
-        action="upscale",
-        telegram_id=telegram_id,
-        model="-",
-        cost_usd=0.0,
-        elapsed_s=elapsed_s,
-        extra=extra,
-    ).emit()
-
 
 def record_event(action: str, **kv: object) -> None:
-    """Generic structured audit event — "одна строка аудита".
+    """Generic structured audit event.
 
-    Observability не знает domain поля — каждый заказчик decides
-    что ему важно. Идеология ideation module (где и был раньше)
-    расширена на весь se-observability.
+    Observability не знает domain поля — каждый заказчик decides что ему важно.
+
+    Format: `audit action=<action> k1=v1 k2=v2 ...`
+    Lists рендерятся как `count=N`, dicts как `keys=a,b`. Всё остальное — str(v).
     """
+    # Lazy logger acquisition — get_logger() требует configure() called first.
+    # Audit callers ВСЕГДА происходят после startup, так что configure уже есть.
+    log = get_logger("audit")
     parts = [f"action={action}"]
     for k, v in kv.items():
         parts.append(f"{k}={_format_value(v)}")
@@ -105,7 +41,6 @@ def record_event(action: str, **kv: object) -> None:
 
 
 def _format_value(v: object) -> str:
-    """Format audit value compactly — lists как count=N, dicts как keys=a,b."""
     if isinstance(v, list | tuple):
         return f"count={len(v)}"
     if isinstance(v, dict):
