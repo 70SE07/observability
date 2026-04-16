@@ -89,3 +89,25 @@ def record_upscale(
         elapsed_s=elapsed_s,
         extra=extra,
     ).emit()
+
+
+def record_event(action: str, **kv: object) -> None:
+    """Generic structured audit event — "одна строка аудита".
+
+    Observability не знает domain поля — каждый заказчик decides
+    что ему важно. Идеология ideation module (где и был раньше)
+    расширена на весь se-observability.
+    """
+    parts = [f"action={action}"]
+    for k, v in kv.items():
+        parts.append(f"{k}={_format_value(v)}")
+    log.info("audit " + " ".join(parts))
+
+
+def _format_value(v: object) -> str:
+    """Format audit value compactly — lists как count=N, dicts как keys=a,b."""
+    if isinstance(v, list | tuple):
+        return f"count={len(v)}"
+    if isinstance(v, dict):
+        return ",".join(str(k) for k in v)
+    return str(v)
