@@ -12,8 +12,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-# Сторонние SDK, чьи логи по умолчанию заворачиваем в файловый handler.
+# Дефолтные значения настроек логирования — ЕДИНСТВЕННЫЙ источник правды (DRY §1).
+# logger.configure() их НЕ дублирует: прокидывает None, резолв дефолта — здесь.
 _DEFAULT_ROUTE_SDKS = ("google.genai", "httpx", "google.api_core.retry")
+_DEFAULT_MAX_BYTES = 10_000_000
+_DEFAULT_BACKUP_COUNT = 5
 
 
 def parse_module_levels(raw: str) -> dict[str, str]:
@@ -48,13 +51,15 @@ class LoggingConfig:
         log_level: str | None = None,
         log_format: str | None = None,
         module_log_levels: dict[str, str] | None = None,
-        route_sdks: tuple[str, ...] = _DEFAULT_ROUTE_SDKS,
-        max_bytes: int = 10_000_000,
-        backup_count: int = 5,
+        route_sdks: tuple[str, ...] | None = None,
+        max_bytes: int | None = None,
+        backup_count: int | None = None,
     ) -> "LoggingConfig":
         """Собрать настройки: явный аргумент имеет приоритет над env, env — над дефолтом.
 
         service_name: аргумент → env SE_OBSERVABILITY_SERVICE → "app".
+        route_sdks / max_bytes / backup_count: None → дефолт из констант модуля
+        (единственный источник правды дефолтов; см. _DEFAULT_* выше).
         """
         svc = (
             service_name
@@ -72,7 +77,9 @@ class LoggingConfig:
             log_level=(log_level or os.environ.get("LOG_LEVEL", "INFO")).upper(),
             log_format=log_format or os.environ.get("LOG_FORMAT", "text"),
             module_levels=dict(levels),
-            route_sdks=route_sdks,
-            max_bytes=max_bytes,
-            backup_count=backup_count,
+            route_sdks=route_sdks if route_sdks is not None else _DEFAULT_ROUTE_SDKS,
+            max_bytes=max_bytes if max_bytes is not None else _DEFAULT_MAX_BYTES,
+            backup_count=(
+                backup_count if backup_count is not None else _DEFAULT_BACKUP_COUNT
+            ),
         )

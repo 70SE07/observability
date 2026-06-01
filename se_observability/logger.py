@@ -82,16 +82,20 @@ def configure(
     log_dir: str | None = None,
     log_level: str | None = None,
     log_format: str | None = None,
-    log_max_bytes: int = 10_000_000,
-    log_backup_count: int = 5,
+    log_max_bytes: int | None = None,
+    log_backup_count: int | None = None,
     module_log_levels: dict[str, str] | None = None,
-    route_sdks: tuple[str, ...] = ("google.genai", "httpx", "google.api_core.retry"),
+    route_sdks: tuple[str, ...] | None = None,
 ) -> None:
     """Initialize observability для service. Call once at startup.
 
     Принимает либо готовый LoggingConfig (`config=`), либо собирает его из
     `service_name` + env/аргументов (обратно совместимо с прежней сигнатурой
-    `configure(service_name=...)`). Источник настроек целиком в config.py.
+    `configure(service_name=...)`).
+
+    Источник настроек — целиком config.py: дефолты НЕ дублируются здесь, все
+    настроечные параметры по умолчанию None и резолвятся внутри
+    LoggingConfig.from_env (DRY §1). Передавай значение, чтобы переопределить.
 
     Idempotent: повторный вызов — no-op (warning при другом service_name).
     """
