@@ -1,11 +1,13 @@
-"""Request context — кореляція запитів frontend ↔ backend.
+"""Request context — наскрізна кореляція запитів frontend ↔ backend.
 
-Три компоненти:
-- request_id_var: ContextVar, встановлюється на кожен HTTP запит
-- RequestIdFilter: додає request_id до кожного лог-запису
-- RequestIdMiddleware: Starlette middleware, читає вхідний X-Request-Id
-  (або генерує новий) + повертає X-Request-Id header + кладе в request.state.
-  Це забезпечує наскрізну трасування через ланцюг сервісів (bridge → upstream).
+ЦКП: request_id, доступний з будь-якого місця async-контексту, проставлений
+у кожен лог-запис і у HTTP-заголовок X-Request-Id. Забезпечує наскрізну
+трасування через ланцюг сервісів (bridge → generation/ideation).
+
+Компоненти:
+- request_id_var: ContextVar — доступний з будь-якого місця async-контексту
+- RequestIdFilter: інжектує request_id в кожен лог-запис
+- RequestIdMiddleware: читає вхідний X-Request-Id (або генерує) на HTTP-границі
 """
 
 import contextvars
@@ -15,9 +17,18 @@ import uuid
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
+# ── Контракт корреляции (DRY: единственный источник правды) ──
+# Имя HTTP-заголовка, по которому сервисы в цепочке сшивают трассу.
+REQUEST_ID_HEADER = "X-Request-Id"
+# Sentinel-значение «request_id не установлен» (для лог-записей вне HTTP-контекста).
+NO_REQUEST_ID = "-"
+
+
 # ── ContextVar: доступний з будь-якого місця в async контексті ──
 
-request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_id", default=NO_REQUEST_ID
+)
 
 
 # ── Filter: інжектує request_id в кожен лог-запис ──
@@ -25,7 +36,7 @@ request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id
 
 class RequestIdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        record.request_id = request_id_var.get("-")  # type: ignore[attr-defined]
+        record.request_id = request_id_var.get(NO_REQUEST_ID)  # type: ignore[attr-defined]
         return True
 
 
@@ -37,14 +48,14 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         # Наскрізна трасування: запит від вищестоящого сервісу (bridge →
         # generation/ideation) несе X-Request-Id — продовжуємо ту саму трасу.
         # Прямий вхід (без заголовка) — генеруємо новий id.
-        rid = request.headers.get("X-Request-Id") or uuid.uuid4().hex[:8]
+        rid = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex[:8]
         # request.state — для споживачів, що читають request.state.request_id
         # (bridge gateway forward прокидає його в upstream-запит).
         request.state.request_id = rid
         token = request_id_var.set(rid)
         try:
             response = await call_next(request)
-            response.headers["X-Request-Id"] = rid
+            response.headers[REQUEST_ID_HEADER] = rid
             return response
         finally:
             request_id_var.reset(token)

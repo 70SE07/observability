@@ -1,48 +1,31 @@
-"""Logger — service-namespaced logging infrastructure.
+"""Logger — сборка подсистемы логирования из готового LoggingConfig.
 
-ЦКП: get_logger(name) → configured Logger с request_id + PII mask + file/console output.
+ЦКП: get_logger(name) → configured Logger в namespace {service}.{name}.
 
-API (контракт):
-    configure(service_name, *, log_dir=None, log_level=None, log_format=None) — один раз at startup
-    get_logger(name) → Logger в namespace {service_name}.{name}
+Принимает готовые настройки (config.py — Триада Config); НЕ знает, откуда они
+берутся (env — забота config.py). PII-маскирование — отдельная единица
+(redaction.py). Import package — без side effects, весь setup внутри configure().
 
-Фиксированный fail-fast: get_logger() до configure() → RuntimeError.
-Import package — без side effects. Все setup внутри configure().
+API (контракт, сохранён обратно-совместимым):
+    configure(service_name=None, *, config=None, ...) — один раз at startup
+    get_logger(name) → Logger
+Fail-fast: get_logger() до configure() → RuntimeError.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-import re
 import sys
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
-from .context import RequestIdFilter
+from .config import LoggingConfig
+from .context import NO_REQUEST_ID, RequestIdFilter
+from .redaction import PIIFilter
 
 # ── Module state (set by configure) ──
 _SERVICE_NAME: str | None = None
 _MODULE_LOG_LEVELS: dict[str, str] = {}
-
-
-# ── PII Filter ──
-_PHONE_RE = re.compile(r"(?<!\d)(\+?\d{1,3}[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{2,4})(?!\d)")
-
-
-class PIIFilter(logging.Filter):
-    """Маскирует телефонные номера в лог-сообщениях как ***PHONE***."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.args:
-            try:
-                record.msg = record.msg % record.args
-                record.args = None
-            except (TypeError, ValueError):
-                pass
-        record.msg = _PHONE_RE.sub("***PHONE***", str(record.msg))
-        return True
 
 
 # ── Formatters ──
@@ -63,17 +46,40 @@ class JSONFormatter(logging.Formatter):
             "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S") + f".{int(record.msecs):03d}Z",
             "level": record.levelname,
             "logger": record.name,
-            "rid": getattr(record, "request_id", "-"),
+            "rid": getattr(record, "request_id", NO_REQUEST_ID),
             "msg": record.getMessage(),
             "service": self._service,
         }
-        return json.dumps(data, ensure_ascii=False)
+        # Structured-поля от metrics/audit (через log.info(..., extra={"fields": {...}}))
+        # эмитятся ОТДЕЛЬНЫМИ ключами JSON, а не подстрокой внутри msg —
+        # открытый формат, пригодный для независимых лог-агрегаторов (Unix §3).
+        fields = getattr(record, "fields", None)
+        if fields is not None:
+            data["fields"] = fields
+        return json.dumps(data, ensure_ascii=False, default=str)
+
+
+# ── Один источник правды «как собрать наш handler» (DRY) ──
+
+
+def _build_handler(
+    handler: logging.Handler,
+    formatter: logging.Formatter,
+    level: int,
+    filters: list[logging.Filter],
+) -> logging.Handler:
+    handler.setFormatter(formatter)
+    handler.setLevel(level)
+    for f in filters:
+        handler.addFilter(f)
+    return handler
 
 
 def configure(
-    service_name: str,
+    service_name: str | None = None,
     *,
-    log_dir: str | Path | None = None,
+    config: LoggingConfig | None = None,
+    log_dir: str | None = None,
     log_level: str | None = None,
     log_format: str | None = None,
     log_max_bytes: int = 10_000_000,
@@ -83,97 +89,82 @@ def configure(
 ) -> None:
     """Initialize observability для service. Call once at startup.
 
-    Args:
-        service_name: logger namespace root, e.g. "bridge", "generation", "ideation"
-        log_dir: directory для log files (default: env LOG_DIR or "./logs")
-        log_level: root level (default: env LOG_LEVEL or "INFO")
-        log_format: "text" | "json" (default: env LOG_FORMAT or "text")
-        log_max_bytes: RotatingFileHandler max size
-        log_backup_count: RotatingFileHandler backup count
-        module_log_levels: per-module override (default: parse env LOG_LEVELS="k=V,...")
-        route_sdks: list of 3rd-party logger names to route through file_handler
+    Принимает либо готовый LoggingConfig (`config=`), либо собирает его из
+    `service_name` + env/аргументов (обратно совместимо с прежней сигнатурой
+    `configure(service_name=...)`). Источник настроек целиком в config.py.
 
-    Idempotent: if already configured, re-invocation no-op'ит (warning если разный service).
+    Idempotent: повторный вызов — no-op (warning при другом service_name).
     """
     global _SERVICE_NAME, _MODULE_LOG_LEVELS
 
     if _SERVICE_NAME is not None:
-        if _SERVICE_NAME != service_name:
+        incoming = (config.service_name if config else service_name) or _SERVICE_NAME
+        if incoming != _SERVICE_NAME:
             logging.getLogger(_SERVICE_NAME).warning(
                 "se_observability.configure() called again с другим service_name: %r → %r — ignored",
                 _SERVICE_NAME,
-                service_name,
+                incoming,
             )
         return
 
-    _SERVICE_NAME = service_name.strip() or "app"
+    cfg = config or LoggingConfig.from_env(
+        service_name,
+        log_dir=log_dir,
+        log_level=log_level,
+        log_format=log_format,
+        module_log_levels=module_log_levels,
+        route_sdks=route_sdks,
+        max_bytes=log_max_bytes,
+        backup_count=log_backup_count,
+    )
 
-    log_dir_resolved = Path(log_dir or os.environ.get("LOG_DIR", "logs"))
-    log_level_resolved = (log_level or os.environ.get("LOG_LEVEL", "INFO")).upper()
-    log_format_resolved = log_format or os.environ.get("LOG_FORMAT", "text")
-
-    if module_log_levels is None:
-        _MODULE_LOG_LEVELS = _parse_module_levels(os.environ.get("LOG_LEVELS", ""))
-    else:
-        _MODULE_LOG_LEVELS = dict(module_log_levels)
+    _SERVICE_NAME = cfg.service_name
+    _MODULE_LOG_LEVELS = cfg.module_levels
 
     try:
-        log_dir_resolved.mkdir(parents=True, exist_ok=True)
+        cfg.log_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise RuntimeError(
-            f"se_observability.configure: cannot create log directory {log_dir_resolved}: {e}"
+            f"se_observability.configure: cannot create log directory {cfg.log_dir}: {e}"
         ) from e
 
-    log_file = log_dir_resolved / "app.log"
-
-    if log_format_resolved == "json":
-        formatter: logging.Formatter = JSONFormatter(_SERVICE_NAME)
+    if cfg.log_format == "json":
+        formatter: logging.Formatter = JSONFormatter(cfg.service_name)
     else:
-        text_fmt = (
-            "%(asctime)s.%(msecs)03d | %(levelname)-7s | %(name)s "
-            "| [%(request_id)s] | %(message)s"
+        formatter = SingleLineFormatter(
+            "%(asctime)s.%(msecs)03d | %(levelname)-7s | %(name)s | [%(request_id)s] | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
-        formatter = SingleLineFormatter(text_fmt, datefmt="%Y-%m-%d %H:%M:%S")
 
-    rid_filter = RequestIdFilter()
-    pii_filter = PIIFilter()
+    filters: list[logging.Filter] = [RequestIdFilter(), PIIFilter()]
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(formatter)
-    console.setLevel(getattr(logging, log_level_resolved, logging.INFO))
-    console.addFilter(rid_filter)
-    console.addFilter(pii_filter)
-
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=log_max_bytes,
-        backupCount=log_backup_count,
-        encoding="utf-8",
+    console = _build_handler(
+        logging.StreamHandler(sys.stdout),
+        formatter,
+        getattr(logging, cfg.log_level, logging.INFO),
+        filters,
     )
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.addFilter(rid_filter)
-    file_handler.addFilter(pii_filter)
+    file_handler = _build_handler(
+        RotatingFileHandler(
+            cfg.log_dir / "app.log",
+            maxBytes=cfg.max_bytes,
+            backupCount=cfg.backup_count,
+            encoding="utf-8",
+        ),
+        formatter,
+        logging.DEBUG,
+        filters,
+    )
 
-    root = logging.getLogger(_SERVICE_NAME)
+    root = logging.getLogger(cfg.service_name)
     root.setLevel(logging.DEBUG)
     root.addHandler(console)
     root.addHandler(file_handler)
 
-    for sdk_name in route_sdks:
+    for sdk_name in cfg.route_sdks:
         sdk = logging.getLogger(sdk_name)
         sdk.setLevel(logging.DEBUG)
         sdk.addHandler(file_handler)
-
-
-def _parse_module_levels(raw: str) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for pair in raw.split(","):
-        pair = pair.strip()
-        if "=" in pair:
-            ns, level = pair.split("=", 1)
-            result[ns.strip()] = level.strip().upper()
-    return result
 
 
 def get_logger(name: str) -> logging.Logger:

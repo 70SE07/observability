@@ -1,6 +1,7 @@
 """Metrics — структуроване відстеження timing та cost.
 
-ЦКП: структуровані метрики з prefix "metric" для парсингу лог-агрегаторами.
+ЦКП: структурована метрика (timing + cost) у відкритому форматі — окремими
+полями (extra "fields") для лог-агрегаторів, плюс читабельний msg для людини.
 Не обчислює pricing (це infra/gemini). Тільки записує та емітить.
 """
 
@@ -10,8 +11,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .logger import get_logger
-
-log = get_logger("metrics")
 
 
 @dataclass
@@ -34,21 +33,29 @@ class RequestMetrics:
             self.model = model
 
     def emit(self) -> None:
-        elapsed = self.elapsed_s
-        extra_str = " ".join(f"{k}={v}" for k, v in self.extra.items())
-        log.info(
-            "metric  endpoint=%s elapsed=%.2fs cost=$%.4f model=%s %s",
-            self.endpoint,
-            elapsed,
-            self.cost_usd,
-            self.model or "-",
-            extra_str,
-        )
+        # Lazy logger acquisition — без side-effect на импорте модуля (как audit).
+        log = get_logger("metrics")
+        fields: dict[str, object] = {
+            "endpoint": self.endpoint,
+            "elapsed_s": round(self.elapsed_s, 2),
+            "cost_usd": round(self.cost_usd, 4),
+            "model": self.model or "-",
+            **self.extra,
+        }
+        # Читабельный msg (text-формат) + structured fields отдельными ключами (JSON).
+        readable = " ".join(f"{k}={v}" for k, v in fields.items())
+        log.info("metric  %s", readable, extra={"fields": fields})
 
 
 @contextmanager
 def track(endpoint: str) -> Iterator[RequestMetrics]:
-    """Context manager for timing an endpoint call. Emits on exit."""
+    """Context manager for timing an endpoint call.
+
+    Метрика эмитится в finally — в обоих исходах (успех и ошибка), чтобы
+    наблюдаемость не терялась именно на упавших запросах.
+    """
     m = RequestMetrics(endpoint=endpoint)
-    yield m
-    m.emit()
+    try:
+        yield m
+    finally:
+        m.emit()
