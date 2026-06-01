@@ -3,7 +3,9 @@
 Три компоненти:
 - request_id_var: ContextVar, встановлюється на кожен HTTP запит
 - RequestIdFilter: додає request_id до кожного лог-запису
-- RequestIdMiddleware: Starlette middleware, генерує rid + X-Request-Id header
+- RequestIdMiddleware: Starlette middleware, читає вхідний X-Request-Id
+  (або генерує новий) + повертає X-Request-Id header + кладе в request.state.
+  Це забезпечує наскрізну трасування через ланцюг сервісів (bridge → upstream).
 """
 
 import contextvars
@@ -27,12 +29,18 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
-# ── Middleware: генерує request_id + повертає X-Request-Id header ──
+# ── Middleware: читає/генерує request_id + повертає X-Request-Id header ──
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
-        rid = uuid.uuid4().hex[:8]
+        # Наскрізна трасування: запит від вищестоящого сервісу (bridge →
+        # generation/ideation) несе X-Request-Id — продовжуємо ту саму трасу.
+        # Прямий вхід (без заголовка) — генеруємо новий id.
+        rid = request.headers.get("X-Request-Id") or uuid.uuid4().hex[:8]
+        # request.state — для споживачів, що читають request.state.request_id
+        # (bridge gateway forward прокидає його в upstream-запит).
+        request.state.request_id = rid
         token = request_id_var.set(rid)
         try:
             response = await call_next(request)
