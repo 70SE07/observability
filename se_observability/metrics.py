@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from .contracts import LOG_FIELDS_KEY
 from .logger import get_logger
 
 
@@ -44,7 +45,7 @@ class RequestMetrics:
         }
         # Читабельный msg (text-формат) + structured fields отдельными ключами (JSON).
         readable = " ".join(f"{k}={v}" for k, v in fields.items())
-        log.info("metric  %s", readable, extra={"fields": fields})
+        log.info("metric  %s", readable, extra={LOG_FIELDS_KEY: fields})
 
 
 @contextmanager

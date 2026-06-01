@@ -14,6 +14,7 @@ Usage:
 
 from __future__ import annotations
 
+from .contracts import LOG_FIELDS_KEY
 from .logger import get_logger
 
 
@@ -31,7 +32,7 @@ def record_event(action: str, **kv: object) -> None:
     log = get_logger("audit")
     fields: dict[str, object] = {"action": action, **kv}
     readable = " ".join(f"{k}={_readable_value(v)}" for k, v in fields.items())
-    log.info("audit %s", readable, extra={"fields": fields})
+    log.info("audit %s", readable, extra={LOG_FIELDS_KEY: fields})
 
 
 def _readable_value(v: object) -> str:

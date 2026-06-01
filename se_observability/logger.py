@@ -21,6 +21,7 @@ from logging.handlers import RotatingFileHandler
 
 from .config import LoggingConfig
 from .context import NO_REQUEST_ID, RequestIdFilter
+from .contracts import LOG_FIELDS_KEY
 from .redaction import PIIFilter
 
 # ── Module state (set by configure) ──
@@ -50,12 +51,13 @@ class JSONFormatter(logging.Formatter):
             "msg": record.getMessage(),
             "service": self._service,
         }
-        # Structured-поля от metrics/audit (через log.info(..., extra={"fields": {...}}))
-        # эмитятся ОТДЕЛЬНЫМИ ключами JSON, а не подстрокой внутри msg —
-        # открытый формат, пригодный для независимых лог-агрегаторов (Unix §3).
-        fields = getattr(record, "fields", None)
+        # Structured-поля от metrics/audit кладутся под ключом LOG_FIELDS_KEY
+        # (контракт contracts.py — единственный источник формы) и эмитятся
+        # ОТДЕЛЬНЫМ ключом JSON, а не подстрокой внутри msg — открытый формат,
+        # пригодный для независимых лог-агрегаторов (Unix §3, Composability §3).
+        fields = getattr(record, LOG_FIELDS_KEY, None)
         if fields is not None:
-            data["fields"] = fields
+            data[LOG_FIELDS_KEY] = fields
         return json.dumps(data, ensure_ascii=False, default=str)
 
 

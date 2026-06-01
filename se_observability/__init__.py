@@ -6,6 +6,7 @@
 - logger    — сборка namespaced-логирования из настроек
 - redaction — маскирование PII в лог-записях
 - context   — request_id корреляция (наскрозная трассировка)
+- contracts — контракт structured-полей лог-записи (ключ + форма канала)
 - metrics   — timing/cost метрики
 - audit     — бизнес-события
 Пакет лишь реэкспортирует их публичный API.
@@ -28,12 +29,15 @@ from .context import (
     RequestIdMiddleware,
     request_id_var,
 )
+from .contracts import LOG_FIELDS_KEY, LogFields
 from .logger import configure, get_logger
 from .redaction import PIIFilter
 
 __all__ = [
+    "LOG_FIELDS_KEY",
     "NO_REQUEST_ID",
     "REQUEST_ID_HEADER",
+    "LogFields",
     "LoggingConfig",
     "PIIFilter",
     "RequestIdFilter",
